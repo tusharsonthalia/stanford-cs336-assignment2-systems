@@ -1,7 +1,7 @@
 [project]
 name = "cs336-basics"
 version = "26.0.4"
-description = "CS336 Assignment 1"
+description = "CS336 Assignment 1 implementation, reused by Assignment 2"
 readme = "README.md"
 requires-python = ">=3.12,<3.14"
 dependencies = [
@@ -19,6 +19,8 @@ dependencies = [
     "wandb>=0.25",
     "ty>=0.0.26",
     "ruff>=0.15.8",
+    "rich>=15.0.0",     # scripts/flops_computation.py tables
+    "matplotlib>=3.11.1",
 ]
 
 [build-system]
