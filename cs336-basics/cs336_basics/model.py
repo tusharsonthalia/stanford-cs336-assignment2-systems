@@ -2,7 +2,7 @@ import torch
 from einops import einsum, rearrange, reduce
 from jaxtyping import Bool, Float, Int
 from torch import Tensor, nn
-
+from torch.cuda import nvtx
 
 class Linear(nn.Module):
     """A bias-free linear transformation, y = x @ W.T.
@@ -355,6 +355,53 @@ def scaled_dot_product_attention(
         probabilities, V,
         "... queries keys, ... keys d_v -> ... queries d_v"
     )
+
+    return attention
+
+@nvtx.range("scaled dot product attention")
+def annotated_scaled_dot_product_attention(
+    Q: Float[Tensor, "... queries d_k"],
+    K: Float[Tensor, "... keys d_k"],
+    V: Float[Tensor, "... keys d_v"],
+    *,
+    mask: Bool[Tensor, "queries keys"] | None = None
+) -> Float[Tensor, "... queries d_v"]:
+    """Scaled dot-product attention:
+
+        Attention(Q, K, V) = softmax(Q K^T / sqrt(d_k)) V
+
+    Maps n queries to n outputs by pooling over m keys.
+
+    Args:
+        Q: Shape (..., queries, d_k).
+        K: Shape (..., keys, d_k).
+        V: Shape (..., keys, d_v).
+        mask: Optional boolean mask; False positions are set to -inf so
+            they receive zero probability after the softmax.
+
+    Returns:
+        Tensor of shape (..., queries, d_v).
+    """
+    d_k = Q.shape[-1]
+    scale = 1 / (d_k ** 0.5)
+
+    with nvtx.range("computing attention scores"):
+        qk_proj = einsum(
+            Q, K, "... queries d_k, ... keys d_k -> ... queries keys"
+        ) * scale
+
+        if mask is not None:
+            qk_proj = torch.where(mask, qk_proj, -torch.inf)
+
+    with nvtx.range("computing softmax"):
+        # shape: (..., num_heads, queries, keys)
+        probabilities = softmax(qk_proj, dimension=-1)
+
+    with nvtx.range("computing output result"):
+        attention = einsum(
+            probabilities, V,
+            "... queries keys, ... keys d_v -> ... queries d_v"
+        )
 
     return attention
 

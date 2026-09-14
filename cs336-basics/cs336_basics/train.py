@@ -103,7 +103,7 @@ def train(config: RunConfig) -> list[dict]:
 
     train_data, validation_data = config.dataset.load()
     model = build_model(config)
-    optimizer = build_optimizer(config)
+    optimizer = build_optimizer(config, model)
     describe(config, train_data.size, validation_data.size)
 
     model.train()
