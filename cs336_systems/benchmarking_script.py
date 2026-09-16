@@ -1,5 +1,6 @@
 import argparse
 import time
+from contextlib import nullcontext
 from dataclasses import asdict, dataclass, field, replace
 from typing import Literal, cast, get_args
 
@@ -22,6 +23,7 @@ Mode = Literal[
 
 MODES: tuple[str, ...] = get_args(Mode)
 MATMUL_PRECISIONS = ("highest", "high", "medium")
+AUTOCAST_CHOICES = ("off", "bf16")
 
 
 @dataclass
@@ -157,6 +159,24 @@ def make_step(model, optimizer, train, targets, vocab_size, mode: Mode):
 
     return step
 
+def wrap_autocast(step, device: torch.device, autocast: str):
+    """Return `step` running under torch.autocast, or unchanged if autocast is off.
+
+    Wrapping rather than branching keeps the `if` out of the timed loop and
+    composes with anything else that wraps the step (compile, nvtx, ...).
+    """
+    ctx = (
+        nullcontext() if autocast == "off"
+        else torch.autocast(device_type=device.type, dtype=torch.bfloat16)
+    )
+
+    def wrapped():
+        with ctx:
+            step()
+
+    return wrapped
+
+
 def benchmark(
     step,
     warmup: int,
@@ -169,10 +189,12 @@ def benchmark(
     synchronize(device)
 
     timer = Timer(name=name, device=device)
+    torch.cuda.memory._record_memory_history(max_entries=1000000)
     for _ in range(measurements):
         with timer:
             step()
-
+    torch.cuda.memory._dump_snapshot("profiles/memory_snapshot.pkl")
+    torch.cuda.memory._record_memory_history(enabled=None)
     return Benchmark(name=name, samples=timer.samples.copy())
 
         
@@ -191,11 +213,14 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--device", default=None, help="force a device, e.g. cpu / cuda:1")
     p.add_argument("--matmul-precision", choices=MATMUL_PRECISIONS, default="highest",
                    help="'high' enables TF32 for fp32 matmuls")
+    p.add_argument("--autocast", choices=AUTOCAST_CHOICES, default="off",
+                   help="mixed precision compute dtype inside torch.autocast")
     p.add_argument("-o", "--out", default=None, help="write the results table to CSV")
     return p
 
 
-def run(config: Config, device: torch.device, modes: list[str], warmup: int, measurements: int) -> list[dict]:
+def run(config: Config, device: torch.device, modes: list[str], warmup: int, measurements: int,
+        autocast: str = "off") -> list[dict]:
     train, targets = make_batch(config.vocab_size, config.batch_size, config.context_length, device)
 
     model = make_model(config, device)
@@ -204,8 +229,10 @@ def run(config: Config, device: torch.device, modes: list[str], warmup: int, mea
     results = []
     for mode in modes:
         step = make_step(model, optimizer, train, targets, config.vocab_size, cast(Mode, mode))
+        step = wrap_autocast(step, device, autocast)
         stats = benchmark(step, warmup, measurements, mode, device).stats
-        results.append({**asdict(config), **stats, "warmup": warmup})
+        results.append({**asdict(config), **stats, "warmup": warmup,
+                        "autocast": autocast, "matmul_precision": torch.get_float32_matmul_precision()})
 
     return results
 
@@ -221,13 +248,14 @@ if __name__ == "__main__":
     modes = [args.mode] if args.mode else list(MODES)
 
     print(f"device={device} tf32={torch.backends.cuda.matmul.allow_tf32} "
+          f"matmul={args.matmul_precision} autocast={args.autocast} "
           f"warmup={args.warmup} n={args.measurements}\n")
 
     results = []
     for name in configs:
         config = replace(benchmark_configs[name],
                          context_length=args.context_length, batch_size=args.batch_size)
-        results.extend(run(config, device, modes, args.warmup, args.measurements))
+        results.extend(run(config, device, modes, args.warmup, args.measurements, args.autocast))
         print(f"{name} done...")
 
     df = pd.DataFrame(results).drop(columns=["samples", "theta", "vocab_size"])
@@ -260,3 +288,9 @@ if __name__ == "__main__":
     
     # 2.4 Intro run with Nsys with more config options and annotated sdpa and full training loop
     # uv run nsys profile --trace=cuda,cublas,nvtx --pytorch=functions-trace,autograd-nvtx --force-overwrite true -o profiles/fourth python cs336_systems/benchmarking_script.py --config small --context-length 256 --mode training-loop -w 1 -n 3
+
+    # 3 Nsys with autocast and annotated sdpa and full training loop
+    # uv run nsys profile --trace=cuda,cublas,nvtx --pytorch=functions-trace,autograd-nvtx --force-overwrite true -o profiles/fifth python cs336_systems/benchmarking_script.py --config small --context-length 256 --mode training-loop -w 1 -n 3 --autocast bf16
+
+    # 4 Memory profiling
+    # uv run cs336_systems/benchmarking_script.py --config medium --context-length 256 --mode training-loop -w 5 -n 10
