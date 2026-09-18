@@ -194,7 +194,14 @@ for _repo in "${_uv_projects[@]}"; do
     # VS Code interpreter picker work on THIS machine. It flips to whichever
     # machine last ran setup, and nothing above depends on it -- uv is always
     # given an explicit UV_PROJECT_ENVIRONMENT, so a dangling .venv is harmless.
-    ln -sfn "$_target" "$_repo/.venv" 2>/dev/null || true
+    # NOTE: this used to be `ln -sfn "$_target" "$_repo/.venv"`, which repointed
+    # <repo>/.venv at whichever machine ran setup last. That broke the VS Code
+    # Python extension on the *other* machine every single time, because Pylance
+    # discovers the interpreter via ${workspaceFolder}/.venv and silently falls
+    # back to a system Python when it dangles. .venv is now left alone: it is
+    # pinned to the notebook host (where the editor runs) and never rewritten.
+    # Nothing here depends on it -- uv is always handed an explicit
+    # UV_PROJECT_ENVIRONMENT (see gotcha 1 in the header).
 
     [ -z "${_UV_PRIMARY:-}" ] && _UV_PRIMARY="$_target"
     echo "setup-uv: syncing $_repo"
